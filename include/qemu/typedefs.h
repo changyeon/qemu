@@ -75,6 +75,7 @@ typedef struct PCMCIACardState PCMCIACardState;
 typedef struct PixelFormat PixelFormat;
 typedef struct PostcopyDiscardState PostcopyDiscardState;
 typedef struct Property Property;
+typedef struct Profiler Profiler;
 typedef struct PropertyInfo PropertyInfo;
 typedef struct QEMUBH QEMUBH;
 typedef struct QemuConsole QemuConsole;

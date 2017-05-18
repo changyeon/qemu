@@ -4776,3 +4776,111 @@
 # Since: 2.7
 ##
 { 'command': 'query-hotpluggable-cpus', 'returns': ['HotpluggableCPU'] }
+
+##
+# @start-profiler:
+#
+# Start VM memory profiler.
+#
+# Since: 2.8
+##
+{ 'command': 'start_profiler' }
+
+##
+# @update-profiler-config:
+#
+# Set the profiler parameters.
+#
+# @period: total profiling period
+# @interval: an interval of the profiling
+# @sampling: sampling factor for the profiling
+#
+# Since: 2.8
+##
+{ 'command': 'set_profiler_parameter',
+  'data': { '*period': 'uint32',
+            '*interval': 'uint32',
+            '*sampling': 'uint32',
+            '*adaptive': 'bool'
+          }
+}
+
+##
+# @ProfilerPrameter:
+#
+# Parameters for the memory profiler.
+#
+# Since: 2.8
+##
+{ 'struct': 'ProfilerParameter',
+  'data': {'period': 'uint32',
+           'interval': 'uint32',
+           'sampling': 'uint32',
+           'max_iteration': 'uint32',
+           'adaptive': 'bool'} }
+
+##
+# @query-profiler-parameter:
+#
+# Query the profiler parameters.
+#
+# Returns: The information of profiler parameters.
+#
+# Since: 2.8
+##
+{ 'command': 'query_profiler_parameter', 'returns': 'ProfilerParameter' }
+
+##
+# @ProfilerState:
+#
+# An enumeration of profiler status.
+#
+# @none: no migration has ever happened.
+#
+# @active: in the process of doing migration.
+
+# @completed: migration is finished.
+#
+# @failed: some error occurred during migration process.
+#
+# Since: 2.8
+#
+##
+{ 'enum': 'ProfilerState',
+  'data': [ 'none', 'active', 'completed' ] }
+
+##
+# @ProfilerInfo:
+#
+# Information about VM memory collected by the profiler.
+#
+# @status: @ProfilerState describing the current profiler status.
+#
+# Since: 2.8
+##
+{ 'struct': 'ProfilerInfo',
+  'data': {'state': 'ProfilerState',
+           '*params': 'ProfilerParameter',
+           '*total_pages': 'uint64',
+           '*zero_pages': 'uint64',
+           '*working_set_pages': 'uint64',
+           '*non_working_set_pages': 'uint64',
+           '*working_set_entropy': 'number',
+           '*non_working_set_entropy': 'number',
+           '*mwpp': 'str',
+           '*pdr': 'str',
+           '*ws': 'str',
+           '*computation_time': 'str'} }
+
+##
+# @query-profile-result:
+#
+# Return information of memory access and use pattern of VM.
+#
+# Returns: The information in the return contains page dirty rate,
+#          working set size, changed word per page, working set entropy,
+#          and total memory size of the VM.
+#
+# Since: 2.8
+##
+{ 'command': 'query_profile_result', 'returns': 'ProfilerInfo' }

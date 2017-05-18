@@ -359,4 +359,43 @@ int ram_save_queue_pages(MigrationState *ms, const char *rbname,
 PostcopyState postcopy_state_get(void);
 /* Set the state and return the old state */
 PostcopyState postcopy_state_set(PostcopyState new_state);
+
+struct Profiler {
+    ProfilerState state;
+    ProfilerParameter params;
+    /*
+     *uint32_t period;
+     *uint32_t interval;
+     *uint32_t sampling;
+     *uint32_t max_iteration;
+     *bool adaptive;
+     */
+    uint64_t ram_bitmap_pages;
+    uint64_t total_pages;
+    uint64_t zero_pages;
+    uint64_t working_set_pages;
+    uint64_t non_working_set_pages;
+    double working_set_entropy;
+    double non_working_set_entropy;
+    uint64_t *mwpp; /* history of modified words per page  */
+    uint64_t *pdr; /* history of page dirty rate */
+    uint64_t *ws; /* history of working set size */
+    uint64_t *computation_time; /* history of working set size */
+
+    /* internal data */
+    QemuThread thread;
+    uint32_t last_max_iteration;
+    struct BitmapRcu *bitmap_rcu; /* bitmap for current iteration */
+    unsigned long *bitmap_ws; /* for working set calculation */
+    unsigned long **bitmap_history; /* contains all dirty bitmaps */
+    uint8_t *delta_cache;
+    uint8_t *delta_cache_valid;
+};
+
+Profiler *profile_get_current(void);
+void ram_profile_init(void);
+void ram_profile_cleanup(void);
+unsigned long *ram_profile_sync(void);
+void ram_profile_post_processing(void);
+void ram_compute_delta(uint64_t *modified_words, uint64_t *modified_pages);
 #endif

@@ -336,3 +336,16 @@ int slow_bitmap_intersects(const unsigned long *bitmap1,
     }
     return 0;
 }
+
+int slow_bitmap_count(const unsigned long *src, long bits)
+{
+    long k;
+    long nr = BITS_TO_LONGS(bits);
+    int count = 0;
+
+    for (k = 0; k < nr; k++) {
+        count += ctpopl(src[k]);
+    }
+
+    return count;
+}

@@ -1985,3 +1985,234 @@ PostcopyState postcopy_state_set(PostcopyState new_state)
     return atomic_xchg(&incoming_postcopy_state, new_state);
 }
 
+Profiler *profile_get_current(void)
+{
+    static Profiler current_profiling = {
+        .state = PROFILER_STATE_NONE,
+        .params = {
+            .period = 20000,
+            .interval = 1000,
+            .sampling = 32,
+            .max_iteration = 20,
+            .adaptive = false,
+        },
+        .ram_bitmap_pages = 0,
+        .total_pages = 0,
+        .zero_pages = 0,
+        .working_set_pages = 0,
+        .non_working_set_pages = 0,
+        .working_set_entropy = 0.0,
+        .non_working_set_entropy = 0.0,
+        .mwpp = NULL,
+        .pdr = NULL,
+        .ws = NULL,
+        .last_max_iteration = 0,
+        .bitmap_rcu = NULL,
+        .bitmap_ws = NULL,
+        .bitmap_history = NULL,
+        .delta_cache = NULL,
+        .delta_cache_valid = NULL,
+    };
+
+    return &current_profiling;
+}
+
+/*
+ * A profiling thread of a VM
+ */
+static void *profiler_thread(void *opaque)
+{
+    Profiler *s = opaque;
+    unsigned long *bitmap = NULL;
+    int64_t t1 = 0, t2 = 0, to_sleep;
+    uint64_t i, modified_words, modified_pages;
+
+    rcu_register_thread();
+    ram_profile_init();
+
+    /* one necessary dirty bitmap sync to compute future delta */
+    g_usleep((s->params).interval * 1000);
+    t1 = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+    ram_profile_sync();
+    ram_compute_delta(&modified_words, &modified_pages);
+    t2 = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+
+    for (i = 0; i < (s->params).max_iteration; i++) {
+        /*
+         * Subtract the sleep time for current iteration by
+         * the computation time of the last iteration.
+         * It is necessary to accurately count dirty page for the given
+         * interval.
+         */
+        to_sleep = (s->params).interval * 1000 - (t2 - t1);
+        if (to_sleep > 0)
+            g_usleep(to_sleep);
+        t1 = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+
+        /* get and store the dirty bitmap of the current iteration */
+        bitmap = ram_profile_sync();
+        s->pdr[i] = bitmap_count(bitmap, s->ram_bitmap_pages);
+        bitmap_and(s->bitmap_history[i], bitmap, bitmap, s->ram_bitmap_pages);
+
+        /* compute the working set bitmap */
+        bitmap_or(s->bitmap_ws, s->bitmap_ws, bitmap, s->ram_bitmap_pages);
+        s->ws[i] = bitmap_count(s->bitmap_ws, s->ram_bitmap_pages);
+
+        /* compute modified words per page of redirtied pages */
+        modified_words = 0;
+        modified_pages = 0;
+        ram_compute_delta(&modified_words, &modified_pages);
+
+        /* prevent divide by zero error */
+        if (modified_pages == 0)
+            s->mwpp[i] = 0;
+        else
+            s->mwpp[i] = modified_words / modified_pages;
+
+        t2 = qemu_clock_get_us(QEMU_CLOCK_REALTIME);
+        s->computation_time[i] = (t2-t1) / 1000;
+    }
+
+    ram_profile_post_processing();
+
+    ram_profile_cleanup();
+
+    rcu_unregister_thread();
+
+    return NULL;
+}
+
+void qmp_start_profiler(Error **errp)
+{
+    Profiler *s = profile_get_current();
+
+    if (s->state == PROFILER_STATE_ACTIVE) {
+        error_setg(errp, "profiler is still running.");
+        return;
+    }
+    qemu_thread_create(&s->thread, "profiler", profiler_thread, s,
+                       QEMU_THREAD_JOINABLE);
+}
+
+void qmp_set_profiler_parameter(bool has_period, uint32_t period,
+                                bool has_interval, uint32_t interval,
+                                bool has_sampling, uint32_t sampling,
+                                bool has_adaptive, bool adaptive, Error **errp)
+{
+    Profiler *s = profile_get_current();
+
+    if (s->state == PROFILER_STATE_ACTIVE) {
+        error_setg(errp, "profiler is still running.");
+        return;
+    }
+
+    if (has_period)
+        (s->params).period = period;
+    if (has_interval)
+        (s->params).interval = interval;
+    if (has_sampling)
+        (s->params).sampling = sampling;
+    if (has_adaptive)
+        (s->params).adaptive = adaptive;
+    if (has_period || has_interval)
+        (s->params).max_iteration = (s->params).period / (s->params).interval;
+}
+
+ProfilerParameter *qmp_query_profiler_parameter(Error **errp)
+{
+    Profiler *s = profile_get_current();
+    ProfilerParameter *params = NULL;
+
+    params = g_malloc0(sizeof(*params));
+
+    params->period = (s->params).period;
+    params->interval = (s->params).interval;
+    params->sampling = (s->params).sampling;
+    params->max_iteration = (s->params).max_iteration;
+    params->adaptive = (s->params).adaptive;
+
+    return params;
+}
+
+ProfilerInfo *qmp_query_profile_result(Error **errp)
+{
+    int i, n;
+    Profiler *s = profile_get_current();
+    ProfilerInfo *profiler_info = NULL;
+    ProfilerParameter *params = NULL;
+
+    profiler_info = g_malloc0(sizeof(*profiler_info));
+    params = g_malloc0(sizeof(*params));
+
+    profiler_info->state = s->state;
+    if (s->state == PROFILER_STATE_NONE) {
+        error_setg(errp, "there is no profile result.");
+        return profiler_info;
+    }
+    if (s->state == PROFILER_STATE_ACTIVE) {
+        error_setg(errp, "profiler is still running.");
+        return profiler_info;
+    }
+
+    profiler_info->has_params = true;
+    params->period = (s->params).period;
+    params->interval = (s->params).interval;
+    params->sampling = (s->params).sampling;
+    params->max_iteration = (s->params).max_iteration;
+    params->adaptive = (s->params).adaptive;
+    profiler_info->params = params;
+
+    profiler_info->has_total_pages = true;
+    profiler_info->total_pages = s->total_pages;
+
+    profiler_info->has_zero_pages = true;
+    profiler_info->zero_pages = s->zero_pages;
+
+    profiler_info->has_working_set_pages = true;
+    profiler_info->working_set_pages = s->working_set_pages;
+
+    profiler_info->has_working_set_entropy = true;
+    profiler_info->working_set_entropy = s->working_set_entropy;
+
+    profiler_info->has_non_working_set_entropy = true;
+    profiler_info->non_working_set_entropy = s->non_working_set_entropy;
+
+    profiler_info->has_mwpp = true;
+    profiler_info->has_pdr = true;
+    profiler_info->has_ws = true;
+    profiler_info->has_computation_time = true;
+
+    profiler_info->mwpp = (char*) g_malloc0(32768);
+    profiler_info->pdr = (char*) g_malloc0(32768);
+    profiler_info->ws = (char*) g_malloc0(32768);
+    profiler_info->computation_time = (char*) g_malloc0(32768);
+
+    for (i = 0, n = 0; i < s->last_max_iteration; i++) {
+        if (i == 0)
+            n += sprintf(&profiler_info->mwpp[n], "%lu", s->mwpp[i]);
+        else
+            n += sprintf(&profiler_info->mwpp[n], ",%lu", s->mwpp[i]);
+    }
+
+    for (i = 0, n = 0; i < s->last_max_iteration; i++)
+        if (i == 0)
+            n += sprintf(&profiler_info->pdr[n], "%lu", s->pdr[i]);
+        else
+            n += sprintf(&profiler_info->pdr[n], ",%lu", s->pdr[i]);
+
+    for (i = 0, n = 0; i < s->last_max_iteration; i++)
+        if (i == 0)
+            n += sprintf(&profiler_info->ws[n], "%lu", s->ws[i]);
+        else
+            n += sprintf(&profiler_info->ws[n], ",%lu", s->ws[i]);
+
+    for (i = 0, n = 0; i < s->last_max_iteration; i++)
+        if (i == 0)
+            n += sprintf(&profiler_info->computation_time[n], "%lu",
+                         s->computation_time[i]);
+        else
+            n += sprintf(&profiler_info->computation_time[n], ",%lu",
+                         s->computation_time[i]);
+
+    return profiler_info;
+}

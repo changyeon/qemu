@@ -44,6 +44,7 @@
 #include "exec/ram_addr.h"
 #include "qemu/rcu_queue.h"
 #include "migration/colo.h"
+#include <math.h>
 
 #ifdef DEBUG_MIGRATION_RAM
 #define DPRINTF(fmt, ...) \
@@ -226,6 +227,7 @@ static RAMBlock *last_seen_block;
 static RAMBlock *last_sent_block;
 static ram_addr_t last_offset;
 static QemuMutex migration_bitmap_mutex;
+static QemuMutex profile_bitmap_mutex;
 static uint64_t migration_dirty_pages;
 static uint32_t last_version;
 static bool ram_bulk_stage;
@@ -2613,4 +2615,243 @@ void ram_mig_init(void)
 {
     qemu_mutex_init(&XBZRLE.lock);
     register_savevm_live(NULL, "ram", 0, 4, &savevm_ram_handlers, NULL);
+}
+
+static uint64_t profile_bitmap_sync_range(Profiler *s, ram_addr_t start,
+                                          ram_addr_t length)
+{
+    unsigned long *bitmap;
+    bitmap = atomic_rcu_read(&(s->bitmap_rcu))->bmap;
+    return cpu_physical_memory_sync_dirty_bitmap(bitmap, start, length);
+}
+
+void ram_profile_init(void)
+{
+    int64_t i, ram_bitmap_pages;
+    uint32_t max_iteration, sampling;
+    Profiler *s = profile_get_current();
+
+    max_iteration = (s->params).max_iteration;
+    sampling = (s->params).sampling;
+
+    s->state = PROFILER_STATE_ACTIVE;
+
+    qemu_mutex_init(&profile_bitmap_mutex);
+
+    qemu_mutex_lock_iothread();
+    qemu_mutex_lock_ramlist();
+    rcu_read_lock();
+
+    reset_ram_globals();
+    ram_bitmap_pages = last_ram_offset() >> TARGET_PAGE_BITS;
+
+    if (s->mwpp)
+        g_free(s->mwpp);
+    if (s->pdr)
+        g_free(s->pdr);
+    if (s->ws)
+        g_free(s->ws);
+    if (s->computation_time)
+        g_free(s->computation_time);
+
+    s->mwpp = g_new0(uint64_t, max_iteration);
+    s->pdr = g_new0(uint64_t, max_iteration);
+    s->ws = g_new0(uint64_t, max_iteration);
+    s->computation_time = g_new0(uint64_t, max_iteration);
+
+    s->ram_bitmap_pages = ram_bitmap_pages;
+    s->bitmap_rcu = g_new0(struct BitmapRcu, 1);
+    s->bitmap_rcu->bmap = bitmap_new(ram_bitmap_pages);
+    bitmap_clear(s->bitmap_rcu->bmap, 0, ram_bitmap_pages);
+
+    s->bitmap_ws = bitmap_new(ram_bitmap_pages);
+    bitmap_clear(s->bitmap_ws, 0, ram_bitmap_pages);
+
+    s->bitmap_history = g_new0(unsigned long *, max_iteration);
+    for (i = 0; i < max_iteration; i++)
+        s->bitmap_history[i] = bitmap_new(ram_bitmap_pages);
+    for (i = 0; i < max_iteration; i++)
+        bitmap_clear(s->bitmap_history[i], 0, ram_bitmap_pages);
+    s->last_max_iteration = max_iteration;
+
+    s->delta_cache_valid = g_new0(uint8_t, ram_bitmap_pages / sampling);
+    s->delta_cache = g_new(
+            uint8_t, (ram_bitmap_pages / sampling) * TARGET_PAGE_SIZE);
+
+    memory_global_dirty_log_start();
+    ram_profile_sync();
+
+    qemu_mutex_unlock_ramlist();
+    qemu_mutex_unlock_iothread();
+    rcu_read_unlock();
+}
+
+void ram_profile_cleanup(void)
+{
+    uint32_t i;
+    Profiler *s = profile_get_current();
+
+    memory_global_dirty_log_stop();
+
+    migration_bitmap_free(s->bitmap_rcu);
+    g_free(s->bitmap_ws);
+    for (i = 0; i < (s->params).max_iteration; i++)
+        g_free(s->bitmap_history[i]);
+    g_free(s->bitmap_history);
+    g_free(s->delta_cache);
+    g_free(s->delta_cache_valid);
+
+    s->bitmap_rcu = NULL;
+    s->bitmap_ws = NULL;
+    s->bitmap_history = NULL;
+    s->delta_cache = NULL;
+    s->delta_cache_valid = NULL;
+
+    s->state = PROFILER_STATE_COMPLETED;
+}
+
+unsigned long* ram_profile_sync(void)
+{
+    Profiler *s = profile_get_current();
+    RAMBlock *block;
+    int64_t ram_bitmap_pages;
+    uint64_t dirty_pages = 0;
+
+    ram_bitmap_pages = s->ram_bitmap_pages;
+
+    memory_global_dirty_log_sync();
+    qemu_mutex_lock(&profile_bitmap_mutex);
+    rcu_read_lock();
+
+    bitmap_clear(s->bitmap_rcu->bmap, 0, ram_bitmap_pages);
+
+    QLIST_FOREACH_RCU(block, &ram_list.blocks, next) {
+        dirty_pages += profile_bitmap_sync_range(s, block->offset,
+                                                 block->used_length);
+    }
+
+    rcu_read_unlock();
+    qemu_mutex_unlock(&profile_bitmap_mutex);
+
+    return (s->bitmap_rcu)->bmap;
+}
+
+void ram_profile_post_processing(void)
+{
+    Profiler *s = profile_get_current();
+    RAMBlock *block;
+    MemoryRegion *mr = NULL;
+    ram_addr_t off = 0;
+    uint8_t *p = NULL, *base_ptr = NULL;
+    uint64_t i, nr = 0, total_pages = 0, zero_pages = 0;
+    uint64_t working_set_pages = 0, non_working_set_pages = 0;
+    uint64_t ws_histogram[256];
+    uint64_t non_ws_histogram[256];
+    double ws_frequency[256];
+    double non_ws_frequency[256];
+    double ws_entropy = 0.0, non_ws_entropy = 0.0;
+
+    for (i = 0; i < 256; i++) {
+        ws_histogram[i] = 0;
+        non_ws_histogram[i] = 0;
+        ws_frequency[i] = 0.0;
+        non_ws_frequency[i] = 0.0;
+    }
+
+    /*
+     * get basic information of VM memory usage such as total number of pages
+     * and working sets.
+     * Also build byte level histogram for (non-)workingset pages for entropy.
+     */
+    QLIST_FOREACH_RCU(block, &ram_list.blocks, next) {
+        mr = block->mr;
+        base_ptr = memory_region_get_ram_ptr(mr);
+        for (off = 0; !(off >= block->used_length); off += TARGET_PAGE_SIZE) {
+            p = base_ptr + off;
+            nr = off >> TARGET_PAGE_BITS;
+
+            if (is_zero_range(p, TARGET_PAGE_SIZE)) {
+                zero_pages++;
+            } else if (test_bit(nr, s->bitmap_ws)) {
+                working_set_pages++;
+                if (!(total_pages % (s->params).sampling))
+                    for (i = 0; i < TARGET_PAGE_SIZE; i++)
+                        ws_histogram[p[i]]++;
+            } else {
+                non_working_set_pages++;
+                if (!(total_pages % (s->params).sampling))
+                    for (i = 0; i < TARGET_PAGE_SIZE; i++)
+                        non_ws_histogram[p[i]]++;
+            }
+            total_pages++;
+        }
+    }
+
+    nr = 0;
+    for (i = 0; i < 256; i++)
+        nr += ws_histogram[i];
+    for (i = 0; i < 256; i++)
+        ws_frequency[i] = (double) ws_histogram[i] / (double) nr;
+
+    nr = 0;
+    for (i = 0; i < 256; i++)
+        nr += non_ws_histogram[i];
+    for (i = 0; i < 256; i++)
+        non_ws_frequency[i] = (double) non_ws_histogram[i] / (double) nr;
+
+    for (i = 0; i < 256; i++) {
+        ws_entropy += ws_frequency[i] * log2(1.0/ws_frequency[i]);
+        non_ws_entropy += non_ws_frequency[i] * log2(1.0/non_ws_frequency[i]);
+    }
+
+    s->total_pages = total_pages;
+    s->zero_pages = zero_pages;
+    s->working_set_pages = working_set_pages;
+    s->non_working_set_pages = non_working_set_pages;
+    s->working_set_entropy = ws_entropy / 8.0;
+    s->non_working_set_entropy = non_ws_entropy / 8.0;
+
+}
+
+void ram_compute_delta(uint64_t *modified_words, uint64_t *modified_pages)
+{
+    Profiler *s = profile_get_current();
+    RAMBlock *block;
+    MemoryRegion *mr = NULL;
+    ram_addr_t off = 0;
+    uint64_t nr, i, index;
+    uint8_t *base_ptr, *p1, *p2;
+
+    QLIST_FOREACH_RCU(block, &ram_list.blocks, next) {
+        mr = block->mr;
+        for (off = 0; !(off >= block->used_length); off += TARGET_PAGE_SIZE) {
+            nr = off >> TARGET_PAGE_BITS;
+            base_ptr = memory_region_get_ram_ptr(mr) + off;
+            index = nr / (s->params).sampling;
+
+            if (nr > s->ram_bitmap_pages)
+                continue;
+            if (nr % (s->params).sampling)
+                continue;
+            if (index > (s->ram_bitmap_pages / (s->params).sampling))
+                continue;
+            if (!test_bit(nr, (s->bitmap_rcu)->bmap))
+                continue;
+
+            if (s->delta_cache_valid[index]) {
+                p1 = (uint8_t*) s->delta_cache + (index * TARGET_PAGE_SIZE);
+                p2 = (uint8_t*) base_ptr;
+                for(i = 0; i < TARGET_PAGE_SIZE; i++)
+                    if (p1[i] != p2[i])
+                        (*modified_words)++;
+                memcpy(p1, p2, TARGET_PAGE_SIZE);
+                (*modified_pages)++;
+            } else {
+                p1 = (uint8_t*) s->delta_cache + (index * TARGET_PAGE_SIZE);
+                p2 = (uint8_t*) base_ptr;
+                memcpy(p1, p2, TARGET_PAGE_SIZE);
+                s->delta_cache_valid[index] = 1;
+            }
+        }
+    }
 }

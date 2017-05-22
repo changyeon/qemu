@@ -2216,3 +2216,13 @@ ProfilerInfo *qmp_query_profile_result(Error **errp)
 
     return profiler_info;
 }
+
+ProcessID *qmp_query_pid(Error **errp)
+{
+    ProcessID *pid;
+
+    pid = g_malloc0(sizeof(*pid));
+    pid->pid = getpid();
+
+    return pid;
+}

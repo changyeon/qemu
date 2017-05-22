@@ -4884,3 +4884,23 @@
 # Since: 2.8
 ##
 { 'command': 'query_profile_result', 'returns': 'ProfilerInfo' }
+
+##
+# @ProcessID:
+#
+# Process ID of the QEMU process
+#
+# Since: 2.8
+##
+{ 'struct': 'ProcessID', 'data': {'pid': 'uint32'} }
+
+##
+# @query-pid:
+#
+# Return the pid of the QEMU VM process.
+#
+# Returns: pid of the process
+#
+# Since: 2.8
+##
+{ 'command': 'query_pid', 'returns': 'ProcessID' }

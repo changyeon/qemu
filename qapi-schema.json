@@ -4787,7 +4787,7 @@
 { 'command': 'start_profiler' }
 
 ##
-# @update-profiler-config:
+# @set-profiler-parameter:
 #
 # Set the profiler parameters.
 #

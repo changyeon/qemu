@@ -2651,12 +2651,18 @@ void ram_profile_init(void)
         g_free(s->pdr);
     if (s->ws)
         g_free(s->ws);
+    if (s->rd)
+        g_free(s->rd);
+    if (s->crd)
+        g_free(s->crd);
     if (s->computation_time)
         g_free(s->computation_time);
 
     s->mwpp = g_new0(uint64_t, max_iteration);
     s->pdr = g_new0(uint64_t, max_iteration);
     s->ws = g_new0(uint64_t, max_iteration);
+    s->rd = g_new0(uint64_t, max_iteration);
+    s->crd = g_new0(uint64_t, max_iteration);
     s->computation_time = g_new0(uint64_t, max_iteration);
 
     s->ram_bitmap_pages = ram_bitmap_pages;
@@ -2666,6 +2672,12 @@ void ram_profile_init(void)
 
     s->bitmap_ws = bitmap_new(ram_bitmap_pages);
     bitmap_clear(s->bitmap_ws, 0, ram_bitmap_pages);
+
+    s->bitmap_rd = bitmap_new(ram_bitmap_pages);
+    bitmap_clear(s->bitmap_rd, 0, ram_bitmap_pages);
+
+    s->bitmap_crd = bitmap_new(ram_bitmap_pages);
+    bitmap_clear(s->bitmap_crd, 0, ram_bitmap_pages);
 
     s->bitmap_history = g_new0(unsigned long *, max_iteration);
     for (i = 0; i < max_iteration; i++)
@@ -2695,6 +2707,8 @@ void ram_profile_cleanup(void)
 
     migration_bitmap_free(s->bitmap_rcu);
     g_free(s->bitmap_ws);
+    g_free(s->bitmap_rd);
+    g_free(s->bitmap_crd);
     for (i = 0; i < (s->params).max_iteration; i++)
         g_free(s->bitmap_history[i]);
     g_free(s->bitmap_history);
@@ -2703,6 +2717,8 @@ void ram_profile_cleanup(void)
 
     s->bitmap_rcu = NULL;
     s->bitmap_ws = NULL;
+    s->bitmap_rd = NULL;
+    s->bitmap_crd = NULL;
     s->bitmap_history = NULL;
     s->delta_cache = NULL;
     s->delta_cache_valid = NULL;

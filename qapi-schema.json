@@ -4870,6 +4870,8 @@
            '*mwpp': 'str',
            '*pdr': 'str',
            '*ws': 'str',
+           '*rd': 'str',
+           '*crd': 'str',
            '*computation_time': 'str'} }
 
 ##

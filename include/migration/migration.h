@@ -380,13 +380,17 @@ struct Profiler {
     uint64_t *mwpp; /* history of modified words per page  */
     uint64_t *pdr; /* history of page dirty rate */
     uint64_t *ws; /* history of working set size */
-    uint64_t *computation_time; /* history of working set size */
+    uint64_t *rd; /* history of redirtied pages */
+    uint64_t *crd; /* history of cumulative redirtied pages */
+    uint64_t *computation_time; /* history of computation time */
 
     /* internal data */
     QemuThread thread;
     uint32_t last_max_iteration;
     struct BitmapRcu *bitmap_rcu; /* bitmap for current iteration */
     unsigned long *bitmap_ws; /* for working set calculation */
+    unsigned long *bitmap_rd; /* for redirtied pages calculation */
+    unsigned long *bitmap_crd; /* cumulative redirtied pages */
     unsigned long **bitmap_history; /* contains all dirty bitmaps */
     uint8_t *delta_cache;
     uint8_t *delta_cache_valid;

@@ -2006,9 +2006,13 @@ Profiler *profile_get_current(void)
         .mwpp = NULL,
         .pdr = NULL,
         .ws = NULL,
+        .rd = NULL,
+        .crd = NULL,
         .last_max_iteration = 0,
         .bitmap_rcu = NULL,
         .bitmap_ws = NULL,
+        .bitmap_rd = NULL,
+        .bitmap_crd = NULL,
         .bitmap_history = NULL,
         .delta_cache = NULL,
         .delta_cache_valid = NULL,
@@ -2053,6 +2057,14 @@ static void *profiler_thread(void *opaque)
         bitmap = ram_profile_sync();
         s->pdr[i] = bitmap_count(bitmap, s->ram_bitmap_pages);
         bitmap_and(s->bitmap_history[i], bitmap, bitmap, s->ram_bitmap_pages);
+
+        /* compute the redirtied bitmap */
+        bitmap_and(s->bitmap_rd, s->bitmap_ws, bitmap, s->ram_bitmap_pages);
+        s->rd[i] = bitmap_count(s->bitmap_rd, s->ram_bitmap_pages);
+
+        /* compute the cumulative redirtied bitmap */
+        bitmap_or(s->bitmap_crd, s->bitmap_crd, s->bitmap_rd, s->ram_bitmap_pages);
+        s->crd[i] = bitmap_count(s->bitmap_crd, s->ram_bitmap_pages);
 
         /* compute the working set bitmap */
         bitmap_or(s->bitmap_ws, s->bitmap_ws, bitmap, s->ram_bitmap_pages);
@@ -2180,11 +2192,15 @@ ProfilerInfo *qmp_query_profile_result(Error **errp)
     profiler_info->has_mwpp = true;
     profiler_info->has_pdr = true;
     profiler_info->has_ws = true;
+    profiler_info->has_rd = true;
+    profiler_info->has_crd = true;
     profiler_info->has_computation_time = true;
 
     profiler_info->mwpp = (char*) g_malloc0(32768);
     profiler_info->pdr = (char*) g_malloc0(32768);
     profiler_info->ws = (char*) g_malloc0(32768);
+    profiler_info->rd = (char*) g_malloc0(32768);
+    profiler_info->crd = (char*) g_malloc0(32768);
     profiler_info->computation_time = (char*) g_malloc0(32768);
 
     for (i = 0, n = 0; i < s->last_max_iteration; i++) {
@@ -2205,6 +2221,18 @@ ProfilerInfo *qmp_query_profile_result(Error **errp)
             n += sprintf(&profiler_info->ws[n], "%lu", s->ws[i]);
         else
             n += sprintf(&profiler_info->ws[n], ",%lu", s->ws[i]);
+
+    for (i = 0, n = 0; i < s->last_max_iteration; i++)
+        if (i == 0)
+            n += sprintf(&profiler_info->rd[n], "%lu", s->rd[i]);
+        else
+            n += sprintf(&profiler_info->rd[n], ",%lu", s->rd[i]);
+
+    for (i = 0, n = 0; i < s->last_max_iteration; i++)
+        if (i == 0)
+            n += sprintf(&profiler_info->crd[n], "%lu", s->crd[i]);
+        else
+            n += sprintf(&profiler_info->crd[n], ",%lu", s->crd[i]);
 
     for (i = 0, n = 0; i < s->last_max_iteration; i++)
         if (i == 0)

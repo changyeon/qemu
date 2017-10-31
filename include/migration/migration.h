@@ -177,6 +177,14 @@ struct MigrationState
     /* Flag set once the migration thread is running (and needs joining) */
     bool migration_thread_running;
 
+    /* it stores the recent dirty rates */
+    int64_t dirty_rate_history[3];
+    int64_t dirty_arr_index;
+    int64_t phase;
+    int64_t second_phase_count;
+    /* Flag set once the migration is hopeless */
+    bool hopeless;
+
     /* Queue of outstanding page requests from the destination */
     QemuMutex src_page_req_mutex;
     QSIMPLEQ_HEAD(src_page_requests, MigrationSrcPageRequest) src_page_requests;
@@ -314,6 +322,7 @@ int migrate_compress_level(void);
 int migrate_compress_threads(void);
 int migrate_decompress_threads(void);
 bool migrate_use_events(void);
+bool migrate_smart_stop(void);
 
 /* Sending on the return path - generic and then for each message type */
 void migrate_send_rp_message(MigrationIncomingState *mis,

@@ -610,6 +610,71 @@ static void migration_bitmap_sync_init(void)
     iterations_prev = 0;
 }
 
+static void smart_stop_and_copy(void)
+{
+    int64_t MA = 0;
+    int64_t i = 0, arr_size = 0;
+    MigrationState *s = migrate_get_current();
+
+    if (s->dirty_sync_count == 0)
+        return;
+
+    for (i = 0; i < 3; i++)
+        if (s->dirty_rate_history[i] != -1)
+            arr_size += 1;
+
+    /* this is the first iteration just update the array */
+    if (arr_size == 0) {
+        s->dirty_rate_history[0] = num_dirty_pages_period;
+        return;
+    }
+
+    /* update the phase */
+    if (!s->phase) {
+        double ratio = 0.0;
+        int64_t last_dirty = 0, curr_dirty = 0;
+
+        last_dirty = s->dirty_rate_history[s->dirty_arr_index];
+        curr_dirty = num_dirty_pages_period;
+
+        ratio = (double) curr_dirty / (double) last_dirty;
+        ratio = ratio - 1.0;
+        ratio = ratio < 0 ? -1*ratio : ratio;
+
+        if (ratio < 0.1)
+            s->phase = 1;
+
+        s->dirty_arr_index = (s->dirty_arr_index + 1) % 3;
+        s->dirty_rate_history[s->dirty_arr_index] = num_dirty_pages_period;
+        return;
+    }
+
+    /* wait for three more interations to get stable moving average */
+    if (s->second_phase_count < 3) {
+        s->second_phase_count += 1;
+        s->dirty_arr_index = (s->dirty_arr_index + 1) % 3;
+        s->dirty_rate_history[s->dirty_arr_index] = num_dirty_pages_period;
+        return;
+    }
+
+    /* compute the moving average */
+    MA = 0;
+    for (i = 0; i < 3; i++)
+        MA += s->dirty_rate_history[i];
+    MA = MA / 3;
+
+    /* is it good to stop here? */
+    if (num_dirty_pages_period < MA)
+        s->hopeless = true;
+
+    /* can't wait it anymore */
+    if (s->dirty_sync_count > 10)
+        s->hopeless = true;
+
+    s->dirty_arr_index = (s->dirty_arr_index + 1) % 3;
+    s->dirty_rate_history[s->dirty_arr_index] = num_dirty_pages_period;
+}
+
 static void migration_bitmap_sync(void)
 {
     RAMBlock *block;
@@ -643,6 +708,9 @@ static void migration_bitmap_sync(void)
                                     - num_dirty_pages_init);
     num_dirty_pages_period += migration_dirty_pages - num_dirty_pages_init;
     end_time = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+
+    if (migrate_smart_stop())
+        smart_stop_and_copy();
 
     /* more than 1 second = 1000 millisecons */
     if (end_time > start_time + 1000) {

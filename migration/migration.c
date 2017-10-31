@@ -92,6 +92,11 @@ MigrationState *migrate_get_current(void)
         .state = MIGRATION_STATUS_NONE,
         .xbzrle_cache_size = DEFAULT_MIGRATE_CACHE_SIZE,
         .mbps = -1,
+        .dirty_rate_history = { -1, -1, -1 },
+        .dirty_arr_index = 0,
+        .phase = 0,
+        .second_phase_count = 0,
+        .hopeless = false,
         .parameters = {
             .compress_level = DEFAULT_MIGRATE_COMPRESS_LEVEL,
             .compress_threads = DEFAULT_MIGRATE_COMPRESS_THREAD_COUNT,
@@ -1323,6 +1328,15 @@ bool migrate_use_events(void)
     return s->enabled_capabilities[MIGRATION_CAPABILITY_EVENTS];
 }
 
+bool migrate_smart_stop(void)
+{
+    MigrationState *s;
+
+    s = migrate_get_current();
+
+    return s->enabled_capabilities[MIGRATION_CAPABILITY_SMART_STOP];
+}
+
 int migrate_use_xbzrle(void)
 {
     MigrationState *s;
@@ -1833,7 +1847,7 @@ static void *migration_thread(void *opaque)
             pending_size = pend_nonpost + pend_post;
             trace_migrate_pending(pending_size, max_size,
                                   pend_post, pend_nonpost);
-            if (pending_size && pending_size >= max_size) {
+            if (!s->hopeless && pending_size && pending_size >= max_size) {
                 /* Still a significant amount to transfer */
 
                 if (migrate_postcopy_ram() &&

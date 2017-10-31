@@ -411,6 +411,9 @@
 # @postcopy-requests: The number of page requests received from the destination
 #        (since 2.7)
 #
+# @hopeless: true if the iterative precopy is hopeless to converge.
+#        (since 2.8)
+#
 # Since: 0.14.0
 ##
 { 'struct': 'MigrationStats',
@@ -418,7 +421,7 @@
            'duplicate': 'int', 'skipped': 'int', 'normal': 'int',
            'normal-bytes': 'int', 'dirty-pages-rate' : 'int',
            'mbps' : 'number', 'dirty-sync-count' : 'int',
-           'postcopy-requests' : 'int' } }
+           'postcopy-requests' : 'int', 'hopeless' : 'bool' } }
 
 ##
 # @XBZRLECacheStats:
@@ -588,11 +591,15 @@
 #        side, this process is called COarse-Grain LOck Stepping (COLO) for
 #        Non-stop Service. (since 2.8)
 #
+# @smart-stop: If enabled, it smartly determine when the migration should stop
+#        it prevents hopeless iterative pre-copy phases when the moving workload
+#        is too heavy. (since 2.8)
+#
 # Since: 1.2
 ##
 { 'enum': 'MigrationCapability',
   'data': ['xbzrle', 'rdma-pin-all', 'auto-converge', 'zero-blocks',
-           'compress', 'events', 'postcopy-ram', 'x-colo'] }
+           'compress', 'events', 'postcopy-ram', 'x-colo', 'smart-stop'] }
 
 ##
 # @MigrationCapabilityStatus:

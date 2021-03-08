@@ -42,6 +42,9 @@
 #define BME_MIN_GRANULARITY_BITS 9
 #define BME_MAX_NAME_SIZE 1023
 
+/* Size of bitmap table entries */
+#define BME_TABLE_ENTRY_SIZE (sizeof(uint64_t))
+
 QEMU_BUILD_BUG_ON(BME_MAX_NAME_SIZE != BDRV_BITMAP_MAX_NAME_SIZE);
 
 #if BME_MAX_TABLE_SIZE * 8ULL > INT_MAX
@@ -232,7 +235,7 @@ static int bitmap_table_load(BlockDriverState *bs, Qcow2BitmapTable *tb,
 
     assert(tb->size <= BME_MAX_TABLE_SIZE);
     ret = bdrv_pread(bs->file, tb->offset,
-                     table, tb->size * sizeof(uint64_t));
+                     table, tb->size * BME_TABLE_ENTRY_SIZE);
     if (ret < 0) {
         goto fail;
     }
@@ -265,7 +268,7 @@ static int free_bitmap_clusters(BlockDriverState *bs, Qcow2BitmapTable *tb)
     }
 
     clear_bitmap_table(bs, bitmap_table, tb->size);
-    qcow2_free_clusters(bs, tb->offset, tb->size * sizeof(uint64_t),
+    qcow2_free_clusters(bs, tb->offset, tb->size * BME_TABLE_ENTRY_SIZE,
                         QCOW2_DISCARD_OTHER);
     g_free(bitmap_table);
 
@@ -690,7 +693,7 @@ int qcow2_check_bitmaps_refcounts(BlockDriverState *bs, BdrvCheckResult *res,
         ret = qcow2_inc_refcounts_imrt(bs, res,
                                        refcount_table, refcount_table_size,
                                        bm->table.offset,
-                                       bm->table.size * sizeof(uint64_t));
+                                       bm->table.size * BME_TABLE_ENTRY_SIZE);
         if (ret < 0) {
             goto out;
         }
@@ -1058,7 +1061,7 @@ fail:
 static Qcow2BitmapInfoFlagsList *get_bitmap_info_flags(uint32_t flags)
 {
     Qcow2BitmapInfoFlagsList *list = NULL;
-    Qcow2BitmapInfoFlagsList **plist = &list;
+    Qcow2BitmapInfoFlagsList **tail = &list;
     int i;
 
     static const struct {
@@ -1073,11 +1076,7 @@ static Qcow2BitmapInfoFlagsList *get_bitmap_info_flags(uint32_t flags)
 
     for (i = 0; i < map_size; ++i) {
         if (flags & map[i].bme) {
-            Qcow2BitmapInfoFlagsList *entry =
-                g_new0(Qcow2BitmapInfoFlagsList, 1);
-            entry->value = map[i].info;
-            *plist = entry;
-            plist = &entry->next;
+            QAPI_LIST_APPEND(tail, map[i].info);
             flags &= ~map[i].bme;
         }
     }
@@ -1102,7 +1101,7 @@ Qcow2BitmapInfoList *qcow2_get_bitmap_info_list(BlockDriverState *bs,
     Qcow2BitmapList *bm_list;
     Qcow2Bitmap *bm;
     Qcow2BitmapInfoList *list = NULL;
-    Qcow2BitmapInfoList **plist = &list;
+    Qcow2BitmapInfoList **tail = &list;
 
     if (s->nb_bitmaps == 0) {
         return NULL;
@@ -1116,13 +1115,10 @@ Qcow2BitmapInfoList *qcow2_get_bitmap_info_list(BlockDriverState *bs,
 
     QSIMPLEQ_FOREACH(bm, bm_list, entry) {
         Qcow2BitmapInfo *info = g_new0(Qcow2BitmapInfo, 1);
-        Qcow2BitmapInfoList *obj = g_new0(Qcow2BitmapInfoList, 1);
         info->granularity = 1U << bm->granularity_bits;
         info->name = g_strdup(bm->name);
         info->flags = get_bitmap_info_flags(bm->flags & ~BME_RESERVED_FLAGS);
-        obj->value = info;
-        *plist = obj;
-        plist = &obj->next;
+        QAPI_LIST_APPEND(tail, info);
     }
 
     bitmap_list_free(bm_list);
@@ -1562,8 +1558,19 @@ void qcow2_store_persistent_dirty_bitmaps(BlockDriverState *bs,
         Qcow2Bitmap *bm;
 
         if (!bdrv_dirty_bitmap_get_persistence(bitmap) ||
-            bdrv_dirty_bitmap_readonly(bitmap) ||
             bdrv_dirty_bitmap_inconsistent(bitmap)) {
+            continue;
+        }
+
+        if (bdrv_dirty_bitmap_readonly(bitmap)) {
+            /*
+             * Store the bitmap in the associated Qcow2Bitmap so it
+             * can be released later
+             */
+            bm = find_bitmap_by_name(bm_list, name);
+            if (bm) {
+                bm->dirty_bitmap = bitmap;
+            }
             continue;
         }
 
@@ -1618,7 +1625,9 @@ void qcow2_store_persistent_dirty_bitmaps(BlockDriverState *bs,
 
     /* allocate clusters and store bitmaps */
     QSIMPLEQ_FOREACH(bm, bm_list, entry) {
-        if (bm->dirty_bitmap == NULL) {
+        BdrvDirtyBitmap *bitmap = bm->dirty_bitmap;
+
+        if (bitmap == NULL || bdrv_dirty_bitmap_readonly(bitmap)) {
             continue;
         }
 
@@ -1641,6 +1650,7 @@ void qcow2_store_persistent_dirty_bitmaps(BlockDriverState *bs,
         g_free(tb);
     }
 
+success:
     if (release_stored) {
         QSIMPLEQ_FOREACH(bm, bm_list, entry) {
             if (bm->dirty_bitmap == NULL) {
@@ -1651,13 +1661,14 @@ void qcow2_store_persistent_dirty_bitmaps(BlockDriverState *bs,
         }
     }
 
-success:
     bitmap_list_free(bm_list);
     return;
 
 fail:
     QSIMPLEQ_FOREACH(bm, bm_list, entry) {
-        if (bm->dirty_bitmap == NULL || bm->table.offset == 0) {
+        if (bm->dirty_bitmap == NULL || bm->table.offset == 0 ||
+            bdrv_dirty_bitmap_readonly(bm->dirty_bitmap))
+        {
             continue;
         }
 
@@ -1747,4 +1758,48 @@ fail:
     error_prepend(errp, "Can't make bitmap '%s' persistent in '%s': ",
                   name, bdrv_get_device_or_node_name(bs));
     return false;
+}
+
+bool qcow2_supports_persistent_dirty_bitmap(BlockDriverState *bs)
+{
+    BDRVQcow2State *s = bs->opaque;
+
+    return s->qcow_version >= 3;
+}
+
+/*
+ * Compute the space required to copy bitmaps from @in_bs.
+ *
+ * The computation is based as if copying to a new image with the
+ * given @cluster_size, which may differ from the cluster size in
+ * @in_bs; in fact, @in_bs might be something other than qcow2.
+ */
+uint64_t qcow2_get_persistent_dirty_bitmap_size(BlockDriverState *in_bs,
+                                                uint32_t cluster_size)
+{
+    uint64_t bitmaps_size = 0;
+    BdrvDirtyBitmap *bm;
+    size_t bitmap_dir_size = 0;
+
+    FOR_EACH_DIRTY_BITMAP(in_bs, bm) {
+        if (bdrv_dirty_bitmap_get_persistence(bm)) {
+            const char *name = bdrv_dirty_bitmap_name(bm);
+            uint32_t granularity = bdrv_dirty_bitmap_granularity(bm);
+            uint64_t bmbytes =
+                get_bitmap_bytes_needed(bdrv_dirty_bitmap_size(bm),
+                                        granularity);
+            uint64_t bmclusters = DIV_ROUND_UP(bmbytes, cluster_size);
+
+            /* Assume the entire bitmap is allocated */
+            bitmaps_size += bmclusters * cluster_size;
+            /* Also reserve space for the bitmap table entries */
+            bitmaps_size += ROUND_UP(bmclusters * BME_TABLE_ENTRY_SIZE,
+                                     cluster_size);
+            /* And space for contribution to bitmap directory size */
+            bitmap_dir_size += calc_dir_entry_size(strlen(name), 0);
+        }
+    }
+    bitmaps_size += ROUND_UP(bitmap_dir_size, cluster_size);
+
+    return bitmaps_size;
 }

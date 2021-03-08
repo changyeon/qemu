@@ -23,6 +23,7 @@
 #include "qemu/log.h"
 #include "qemu/module.h"
 #include "trace.h"
+#include "qom/object.h"
 
 static const char *names[] = {
     "SCNTL0", "SCNTL1", "SCNTL2", "SCNTL3", "SCID", "SXFER", "SDID", "GPREG",
@@ -213,7 +214,7 @@ enum {
     LSI_MSG_ACTION_DIN = 3,
 };
 
-typedef struct {
+struct LSIState {
     /*< private >*/
     PCIDevice parent_obj;
     /*< public >*/
@@ -303,13 +304,12 @@ typedef struct {
     uint32_t adder;
 
     uint8_t script_ram[2048 * sizeof(uint32_t)];
-} LSIState;
+};
 
 #define TYPE_LSI53C810  "lsi53c810"
 #define TYPE_LSI53C895A "lsi53c895a"
 
-#define LSI53C895A(obj) \
-    OBJECT_CHECK(LSIState, (obj), TYPE_LSI53C895A)
+OBJECT_DECLARE_SIMPLE_TYPE(LSIState, LSI53C895A)
 
 static const char *scsi_phases[] = {
     "DOUT",
@@ -787,14 +787,14 @@ static int lsi_queue_req(LSIState *s, SCSIRequest *req, uint32_t len)
 }
 
  /* Callback to indicate that the SCSI layer has completed a command.  */
-static void lsi_command_complete(SCSIRequest *req, uint32_t status, size_t resid)
+static void lsi_command_complete(SCSIRequest *req, size_t resid)
 {
     LSIState *s = LSI53C895A(req->bus->qbus.parent);
     int out;
 
     out = (s->sstat1 & PHASE_MASK) == PHASE_DO;
-    trace_lsi_command_complete(status);
-    s->status = status;
+    trace_lsi_command_complete(req->status);
+    s->status = req->status;
     s->command_complete = 2;
     if (s->waiting && s->dbc != 0) {
         /* Raise phase mismatch for short transfers.  */
@@ -2312,7 +2312,7 @@ static void lsi_scsi_realize(PCIDevice *dev, Error **errp)
     scsi_bus_new(&s->bus, sizeof(s->bus), d, &lsi_scsi_info, NULL);
 }
 
-static void lsi_scsi_unrealize(DeviceState *dev, Error **errp)
+static void lsi_scsi_unrealize(DeviceState *dev)
 {
     LSIState *s = LSI53C895A(dev);
 

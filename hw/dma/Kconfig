@@ -18,5 +18,11 @@ config ZYNQ_DEVCFG
     bool
     select REGISTER
 
+config XLNX_ZDMA
+    bool
+
 config STP2000
+    bool
+
+config SIFIVE_PDMA
     bool

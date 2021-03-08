@@ -67,7 +67,12 @@ class KernelDocDirective(Directive):
 
     def run(self):
         env = self.state.document.settings.env
-        cmd = [env.config.kerneldoc_bin, '-rst', '-enable-lineno']
+        cmd = env.config.kerneldoc_bin + ['-rst', '-enable-lineno']
+
+        # Pass the version string to kernel-doc, as it needs to use a different
+        # dialect, depending what the C domain supports for each specific
+        # Sphinx versions
+        cmd += ['-sphinx-version', sphinx.__version__]
 
         filename = env.config.kerneldoc_srctree + '/' + self.arguments[0]
         export_file_patterns = []

@@ -88,7 +88,10 @@ static struct io_uring_sqe *get_sqe(AioContext *ctx)
     }
 
     /* No free sqes left, submit pending sqes first */
-    ret = io_uring_submit(ring);
+    do {
+        ret = io_uring_submit(ring);
+    } while (ret == -EINTR);
+
     assert(ret > 1);
     sqe = io_uring_get_sqe(ring);
     assert(sqe);
@@ -100,7 +103,7 @@ static void enqueue(AioHandlerSList *head, AioHandler *node, unsigned flags)
 {
     unsigned old_flags;
 
-    old_flags = atomic_fetch_or(&node->flags, FDMON_IO_URING_PENDING | flags);
+    old_flags = qatomic_fetch_or(&node->flags, FDMON_IO_URING_PENDING | flags);
     if (!(old_flags & FDMON_IO_URING_PENDING)) {
         QSLIST_INSERT_HEAD_ATOMIC(head, node, node_submitted);
     }
@@ -124,7 +127,7 @@ static AioHandler *dequeue(AioHandlerSList *head, unsigned *flags)
      * telling process_cqe() to delete the AioHandler when its
      * IORING_OP_POLL_ADD completes.
      */
-    *flags = atomic_fetch_and(&node->flags, ~(FDMON_IO_URING_PENDING |
+    *flags = qatomic_fetch_and(&node->flags, ~(FDMON_IO_URING_PENDING |
                                               FDMON_IO_URING_ADD));
     return node;
 }
@@ -230,7 +233,7 @@ static bool process_cqe(AioContext *ctx,
      * with enqueue() here then we can safely clear the FDMON_IO_URING_REMOVE
      * bit before IORING_OP_POLL_REMOVE is submitted.
      */
-    flags = atomic_fetch_and(&node->flags, ~FDMON_IO_URING_REMOVE);
+    flags = qatomic_fetch_and(&node->flags, ~FDMON_IO_URING_REMOVE);
     if (flags & FDMON_IO_URING_REMOVE) {
         QLIST_INSERT_HEAD_RCU(&ctx->deleted_aio_handlers, node, node_deleted);
         return false;
@@ -270,7 +273,7 @@ static int fdmon_io_uring_wait(AioContext *ctx, AioHandlerList *ready_list,
     int ret;
 
     /* Fall back while external clients are disabled */
-    if (atomic_read(&ctx->external_disable_cnt)) {
+    if (qatomic_read(&ctx->external_disable_cnt)) {
         return fdmon_poll_ops.wait(ctx, ready_list, timeout);
     }
 
@@ -282,7 +285,10 @@ static int fdmon_io_uring_wait(AioContext *ctx, AioHandlerList *ready_list,
 
     fill_sq_ring(ctx);
 
-    ret = io_uring_submit_and_wait(&ctx->fdmon_io_uring, wait_nr);
+    do {
+        ret = io_uring_submit_and_wait(&ctx->fdmon_io_uring, wait_nr);
+    } while (ret == -EINTR);
+
     assert(ret >= 0);
 
     return process_cq_ring(ctx, ready_list);
@@ -290,7 +296,23 @@ static int fdmon_io_uring_wait(AioContext *ctx, AioHandlerList *ready_list,
 
 static bool fdmon_io_uring_need_wait(AioContext *ctx)
 {
-    return io_uring_cq_ready(&ctx->fdmon_io_uring);
+    /* Have io_uring events completed? */
+    if (io_uring_cq_ready(&ctx->fdmon_io_uring)) {
+        return true;
+    }
+
+    /* Are there pending sqes to submit? */
+    if (io_uring_sq_ready(&ctx->fdmon_io_uring)) {
+        return true;
+    }
+
+    /* Do we need to process AioHandlers for io_uring changes? */
+    if (!QSLIST_EMPTY_RCU(&ctx->submit_list)) {
+        return true;
+    }
+
+    /* Are we falling back to fdmon-poll? */
+    return qatomic_read(&ctx->external_disable_cnt);
 }
 
 static const FDMonOps fdmon_io_uring_ops = {
@@ -320,11 +342,18 @@ void fdmon_io_uring_destroy(AioContext *ctx)
 
         io_uring_queue_exit(&ctx->fdmon_io_uring);
 
-        /* No need to submit these anymore, just free them. */
+        /* Move handlers due to be removed onto the deleted list */
         while ((node = QSLIST_FIRST_RCU(&ctx->submit_list))) {
+            unsigned flags = qatomic_fetch_and(&node->flags,
+                    ~(FDMON_IO_URING_PENDING |
+                      FDMON_IO_URING_ADD |
+                      FDMON_IO_URING_REMOVE));
+
+            if (flags & FDMON_IO_URING_REMOVE) {
+                QLIST_INSERT_HEAD_RCU(&ctx->deleted_aio_handlers, node, node_deleted);
+            }
+
             QSLIST_REMOVE_HEAD_RCU(&ctx->submit_list, node_submitted);
-            QLIST_REMOVE(node, node);
-            g_free(node);
         }
 
         ctx->fdmon_ops = &fdmon_poll_ops;

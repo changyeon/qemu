@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# group: rw
 #
 # Test ssh image creation
 #
@@ -24,8 +25,10 @@ import iotests
 import subprocess
 import re
 
-iotests.verify_image_format(supported_fmts=['raw'])
-iotests.verify_protocol(supported=['ssh'])
+iotests.script_initialize(
+    supported_fmts=['raw'],
+    supported_protocols=['ssh'],
+)
 
 def filter_hash(qmsg):
     def _filter(key, value):

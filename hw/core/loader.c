@@ -44,6 +44,7 @@
 
 #include "qemu/osdep.h"
 #include "qemu-common.h"
+#include "qemu/datadir.h"
 #include "qapi/error.h"
 #include "trace.h"
 #include "hw/hw.h"
@@ -1165,34 +1166,77 @@ static void rom_reset(void *unused)
     }
 }
 
+/* Return true if two consecutive ROMs in the ROM list overlap */
+static bool roms_overlap(Rom *last_rom, Rom *this_rom)
+{
+    if (!last_rom) {
+        return false;
+    }
+    return last_rom->as == this_rom->as &&
+        last_rom->addr + last_rom->romsize > this_rom->addr;
+}
+
+static const char *rom_as_name(Rom *rom)
+{
+    const char *name = rom->as ? rom->as->name : NULL;
+    return name ?: "anonymous";
+}
+
+static void rom_print_overlap_error_header(void)
+{
+    error_report("Some ROM regions are overlapping");
+    error_printf(
+        "These ROM regions might have been loaded by "
+        "direct user request or by default.\n"
+        "They could be BIOS/firmware images, a guest kernel, "
+        "initrd or some other file loaded into guest memory.\n"
+        "Check whether you intended to load all this guest code, and "
+        "whether it has been built to load to the correct addresses.\n");
+}
+
+static void rom_print_one_overlap_error(Rom *last_rom, Rom *rom)
+{
+    error_printf(
+        "\nThe following two regions overlap (in the %s address space):\n",
+        rom_as_name(rom));
+    error_printf(
+        "  %s (addresses 0x" TARGET_FMT_plx " - 0x" TARGET_FMT_plx ")\n",
+        last_rom->name, last_rom->addr, last_rom->addr + last_rom->romsize);
+    error_printf(
+        "  %s (addresses 0x" TARGET_FMT_plx " - 0x" TARGET_FMT_plx ")\n",
+        rom->name, rom->addr, rom->addr + rom->romsize);
+}
+
 int rom_check_and_register_reset(void)
 {
-    hwaddr addr = 0;
     MemoryRegionSection section;
-    Rom *rom;
-    AddressSpace *as = NULL;
+    Rom *rom, *last_rom = NULL;
+    bool found_overlap = false;
 
     QTAILQ_FOREACH(rom, &roms, next) {
         if (rom->fw_file) {
             continue;
         }
         if (!rom->mr) {
-            if ((addr > rom->addr) && (as == rom->as)) {
-                fprintf(stderr, "rom: requested regions overlap "
-                        "(rom %s. free=0x" TARGET_FMT_plx
-                        ", addr=0x" TARGET_FMT_plx ")\n",
-                        rom->name, addr, rom->addr);
-                return -1;
+            if (roms_overlap(last_rom, rom)) {
+                if (!found_overlap) {
+                    found_overlap = true;
+                    rom_print_overlap_error_header();
+                }
+                rom_print_one_overlap_error(last_rom, rom);
+                /* Keep going through the list so we report all overlaps */
             }
-            addr  = rom->addr;
-            addr += rom->romsize;
-            as = rom->as;
+            last_rom = rom;
         }
         section = memory_region_find(rom->mr ? rom->mr : get_system_memory(),
                                      rom->addr, 1);
         rom->isrom = int128_nz(section.size) && memory_region_is_rom(section.mr);
         memory_region_unref(section.mr);
     }
+    if (found_overlap) {
+        return -1;
+    }
+
     qemu_register_reset(rom_reset, NULL);
     roms_loaded = 1;
     return 0;
@@ -1447,6 +1491,7 @@ typedef struct {
     uint32_t current_rom_index;
     uint32_t rom_start_address;
     AddressSpace *as;
+    bool complete;
 } HexParser;
 
 /* return size or -1 if error */
@@ -1484,6 +1529,7 @@ static int handle_record_type(HexParser *parser)
                                   parser->current_rom_index,
                                   parser->rom_start_address, parser->as);
         }
+        parser->complete = true;
         return parser->total_size;
     case EXT_SEG_ADDR_RECORD:
     case EXT_LINEAR_ADDR_RECORD:
@@ -1548,11 +1594,12 @@ static int parse_hex_blob(const char *filename, hwaddr *addr, uint8_t *hex_blob,
         .bin_buf = g_malloc(hex_blob_size),
         .start_addr = addr,
         .as = as,
+        .complete = false
     };
 
     rom_transaction_begin();
 
-    for (; hex_blob < end; ++hex_blob) {
+    for (; hex_blob < end && !parser.complete; ++hex_blob) {
         switch (*hex_blob) {
         case '\r':
         case '\n':

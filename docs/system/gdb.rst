@@ -1,19 +1,27 @@
-.. _gdb_005fusage:
+.. _GDB usage:
 
 GDB usage
 ---------
 
-QEMU has a primitive support to work with gdb, so that you can do
-'Ctrl-C' while the virtual machine is running and inspect its state.
+QEMU supports working with gdb via gdb's remote-connection facility
+(the "gdbstub"). This allows you to debug guest code in the same
+way that you might with a low-level debug facility like JTAG
+on real hardware. You can stop and start the virtual machine,
+examine state like registers and memory, and set breakpoints and
+watchpoints.
 
-In order to use gdb, launch QEMU with the '-s' option. It will wait for
-a gdb connection:
+In order to use gdb, launch QEMU with the ``-s`` and ``-S`` options.
+The ``-s`` option will make QEMU listen for an incoming connection
+from gdb on TCP port 1234, and ``-S`` will make QEMU not start the
+guest until you tell it to from gdb. (If you want to specify which
+TCP port to use or to use something other than TCP for the gdbstub
+connection, use the ``-gdb dev`` option instead of ``-s``.)
 
 .. parsed-literal::
 
-   |qemu_system| -s -kernel bzImage -hda rootdisk.img -append "root=/dev/hda"
-   Connected to host network interface: tun0
-   Waiting gdb connection on port 1234
+   |qemu_system| -s -S -kernel bzImage -hda rootdisk.img -append "root=/dev/hda"
+
+QEMU will launch but will silently wait for gdb to connect.
 
 Then launch gdb on the 'vmlinux' executable::
 
@@ -79,3 +87,23 @@ three commands you can query and set the single step behavior:
       (gdb) maintenance packet Qqemu.sstep=0x5
       sending: "qemu.sstep=0x5"
       received: "OK"
+
+
+Another feature that QEMU gdbstub provides is to toggle the memory GDB
+works with, by default GDB will show the current process memory respecting
+the virtual address translation.
+
+If you want to examine/change the physical memory you can set the gdbstub
+to work with the physical memory rather with the virtual one.
+
+The memory mode can be checked by sending the following command:
+
+``maintenance packet qqemu.PhyMemMode``
+    This will return either 0 or 1, 1 indicates you are currently in the
+    physical memory mode.
+
+``maintenance packet Qqemu.PhyMemMode:1``
+    This will change the memory mode to physical memory.
+
+``maintenance packet Qqemu.PhyMemMode:0``
+    This will change it back to normal memory mode.

@@ -1,5 +1,5 @@
 FROM ubuntu:18.04
-ENV PACKAGES flex bison \
+ENV PACKAGES \
     ccache \
     clang \
     gcc \
@@ -48,13 +48,13 @@ ENV PACKAGES flex bison \
     make \
     python3-yaml \
     python3-sphinx \
+    ninja-build \
     sparse \
-    texinfo \
     xfslibs-dev
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get -y install $PACKAGES
 RUN dpkg -l $PACKAGES | sort > /packages.txt
-ENV FEATURES clang pyyaml sdl2
+ENV FEATURES clang pyyaml sdl2 docs
 
 # https://bugs.launchpad.net/qemu/+bug/1838763
 ENV QEMU_CONFIGURE_OPTS --disable-libssh

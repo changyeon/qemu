@@ -10,7 +10,7 @@
  */
 
 #include "qemu/osdep.h"
-#include "libqtest.h"
+#include "libqos/libqtest.h"
 #include "qapi/qmp/qdict.h"
 #include "qapi/qmp/qlist.h"
 
@@ -455,7 +455,7 @@ static void pc_hmat_off_cfg(const void *data)
     cli = make_cli(data, "-nodefaults --preconfig "
                          "-smp 2,sockets=2 "
                          "-m 128M,slots=2,maxmem=1G "
-                         "-object memory-backend-ram,size=64M,id=m0 "
+                         "-object memory-backend-ram,size=64M,id=m0,prealloc=y "
                          "-object memory-backend-ram,size=64M,id=m1 "
                          "-numa node,nodeid=0,memdev=m0");
     qs = qtest_init(cli);

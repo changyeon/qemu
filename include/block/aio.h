@@ -17,6 +17,7 @@
 #ifdef CONFIG_LINUX_IO_URING
 #include <liburing.h>
 #endif
+#include "qemu/coroutine.h"
 #include "qemu/queue.h"
 #include "qemu/event_notifier.h"
 #include "qemu/thread.h"
@@ -133,12 +134,16 @@ struct AioContext {
     AioHandlerList deleted_aio_handlers;
 
     /* Used to avoid unnecessary event_notifier_set calls in aio_notify;
-     * accessed with atomic primitives.  If this field is 0, everything
-     * (file descriptors, bottom halves, timers) will be re-evaluated
-     * before the next blocking poll(), thus the event_notifier_set call
-     * can be skipped.  If it is non-zero, you may need to wake up a
-     * concurrent aio_poll or the glib main event loop, making
-     * event_notifier_set necessary.
+     * only written from the AioContext home thread, or under the BQL in
+     * the case of the main AioContext.  However, it is read from any
+     * thread so it is still accessed with atomic primitives.
+     *
+     * If this field is 0, everything (file descriptors, bottom halves,
+     * timers) will be re-evaluated before the next blocking poll() or
+     * io_uring wait; therefore, the event_notifier_set call can be
+     * skipped.  If it is non-zero, you may need to wake up a concurrent
+     * aio_poll or the glib main event loop, making event_notifier_set
+     * necessary.
      *
      * Bit 0 is reserved for GSource usage of the AioContext, and is 1
      * between a call to aio_ctx_prepare and the next call to aio_ctx_check.
@@ -591,7 +596,7 @@ int64_t aio_compute_timeout(AioContext *ctx);
  */
 static inline void aio_disable_external(AioContext *ctx)
 {
-    atomic_inc(&ctx->external_disable_cnt);
+    qatomic_inc(&ctx->external_disable_cnt);
 }
 
 /**
@@ -604,7 +609,7 @@ static inline void aio_enable_external(AioContext *ctx)
 {
     int old;
 
-    old = atomic_fetch_dec(&ctx->external_disable_cnt);
+    old = qatomic_fetch_dec(&ctx->external_disable_cnt);
     assert(old > 0);
     if (old == 1) {
         /* Kick event loop so it re-arms file descriptors */
@@ -620,7 +625,7 @@ static inline void aio_enable_external(AioContext *ctx)
  */
 static inline bool aio_external_disabled(AioContext *ctx)
 {
-    return atomic_read(&ctx->external_disable_cnt);
+    return qatomic_read(&ctx->external_disable_cnt);
 }
 
 /**
@@ -633,7 +638,7 @@ static inline bool aio_external_disabled(AioContext *ctx)
  */
 static inline bool aio_node_check(AioContext *ctx, bool is_external)
 {
-    return !is_external || !atomic_read(&ctx->external_disable_cnt);
+    return !is_external || !qatomic_read(&ctx->external_disable_cnt);
 }
 
 /**
@@ -649,6 +654,15 @@ static inline bool aio_node_check(AioContext *ctx, bool is_external)
  * qemu_get_current_aio_context() from the coroutine itself).
  */
 void aio_co_schedule(AioContext *ctx, struct Coroutine *co);
+
+/**
+ * aio_co_reschedule_self:
+ * @new_ctx: the new context
+ *
+ * Move the currently running coroutine to new_ctx. If the coroutine is already
+ * running in new_ctx, do nothing.
+ */
+void coroutine_fn aio_co_reschedule_self(AioContext *new_ctx);
 
 /**
  * aio_co_wake:
@@ -682,19 +696,6 @@ void aio_co_enter(AioContext *ctx, struct Coroutine *co);
 AioContext *qemu_get_current_aio_context(void);
 
 /**
- * in_aio_context_home_thread:
- * @ctx: the aio context
- *
- * Return whether we are running in the thread that normally runs @ctx.  Note
- * that acquiring/releasing ctx does not affect the outcome, each AioContext
- * still only has one home thread that is responsible for running it.
- */
-static inline bool in_aio_context_home_thread(AioContext *ctx)
-{
-    return ctx == qemu_get_current_aio_context();
-}
-
-/**
  * aio_context_setup:
  * @ctx: the aio context
  *
@@ -709,6 +710,9 @@ void aio_context_setup(AioContext *ctx);
  * Destroy the aio context.
  */
 void aio_context_destroy(AioContext *ctx);
+
+/* Used internally, do not call outside AioContext code */
+void aio_context_use_g_source(AioContext *ctx);
 
 /**
  * aio_context_set_poll_params:
